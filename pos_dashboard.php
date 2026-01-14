@@ -232,7 +232,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $table_id = (int)($_POST['table_id'] ?? 0);
             $quantities = $_POST['quantity'] ?? [];
             $notes = $_POST['notes'] ?? '';
+            
+            // Debug: log the received data
+            error_log("DEBUG add_order START: table_id=$table_id, current_branch_id=$current_branch_id, quantities=" . json_encode($quantities));
+            
             if ($table_id > 0 && !empty($quantities) && $current_branch_id) {
+                error_log("DEBUG: Condition passed");
                 // Get table number
                 $table_stmt = $conn->prepare("SELECT table_number FROM restaurant_tables WHERE id = ? AND branch_id = ?");
                 $table_stmt->bind_param("ii", $table_id, $current_branch_id);
@@ -241,10 +246,13 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 if ($table_result->num_rows > 0) {
                     $table = $table_result->fetch_assoc();
                     $table_number = $table['table_number'];
+                    error_log("DEBUG: Table found, table_number=$table_number");
                     $table_stmt->close();
                 } else {
                     $message = "Mesa no encontrada.";
+                    error_log("DEBUG: Table NOT found for table_id=$table_id, branch_id=$current_branch_id");
                     $table_stmt->close();
+                    return; // Exit early if table not found
                 }
 
                 // Calculate total
@@ -267,37 +275,63 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                     }
                 }
                 if ($total > 0) {
+                    error_log("DEBUG: Total > 0, ready to insert. Total=$total, table_number=$table_number, user_id={$_SESSION['user_id']}, branch_id=$current_branch_id, notes=$notes");
+                    error_log("DEBUG: Order items count: " . count($order_items));
                     // Insert order
                     $order_stmt = $conn->prepare("INSERT INTO orders (table_number, user_id, branch_id, total, status, notes, created_at) VALUES (?, ?, ?, ?, 'pending', ?, NOW())");
-                    $order_stmt->bind_param("siids", $table_number, (int)$_SESSION['user_id'], (int)$current_branch_id, $total, $notes);
-                    if ($order_stmt->execute()) {
-                        $order_id = $conn->insert_id;
-                        // Insert order items
-                        foreach ($order_items as $item) {
-                            $item_stmt = $conn->prepare("INSERT INTO order_items (order_id, menu_item_id, quantity, price) VALUES (?, ?, ?, ?)");
-                            $item_stmt->bind_param("iiid", $order_id, $item['item_id'], $item['quantity'], $item['price']);
-                            if (!$item_stmt->execute()) {
-                                $message = "Error al insertar item del pedido: " . $conn->error;
-                            }
-                            $item_stmt->close();
-                        }
-                        // Update table status to occupied
-                        $update_stmt = $conn->prepare("UPDATE restaurant_tables SET status = 'occupied' WHERE id = ? AND branch_id = ?");
-                        $update_stmt->bind_param("ii", $table_id, $current_branch_id);
-                        if (!$update_stmt->execute()) {
-                            $message = "Error al actualizar estado de la mesa: " . $conn->error;
-                        }
-                        $update_stmt->close();
-                        $message = "Pedido enviado a cocina exitosamente.";
+                    if (!$order_stmt) {
+                        $message = "Error preparando consulta: " . $conn->error;
+                        error_log("DEBUG: Prepare failed: " . $conn->error);
                     } else {
-                        $message = "Error al crear el pedido: " . $conn->error;
+                        // Create variables for bind_param (must be actual variables, not expressions)
+                        $user_id_int = (int)$_SESSION['user_id'];
+                        $branch_id_int = (int)$current_branch_id;
+                        $order_stmt->bind_param("siids", $table_number, $user_id_int, $branch_id_int, $total, $notes);
+                        error_log("DEBUG: About to execute INSERT");
+                        if ($order_stmt->execute()) {
+                            $order_id = $conn->insert_id;
+                            error_log("DEBUG: Order created successfully, order_id=$order_id");
+                            // Insert order items
+                            foreach ($order_items as $item) {
+                                $item_stmt = $conn->prepare("INSERT INTO order_items (order_id, menu_item_id, quantity, price) VALUES (?, ?, ?, ?)");
+                                if (!$item_stmt) {
+                                    error_log("DEBUG: Prepare failed for order items: " . $conn->error);
+                                    continue;
+                                }
+                                $item_stmt->bind_param("iiid", $order_id, $item['item_id'], $item['quantity'], $item['price']);
+                                if (!$item_stmt->execute()) {
+                                    $message = "Error al insertar item del pedido: " . $conn->error;
+                                    error_log("DEBUG: Error inserting order item: " . $conn->error);
+                                }
+                                $item_stmt->close();
+                            }
+                            // Update table status to occupied
+                            $update_stmt = $conn->prepare("UPDATE restaurant_tables SET status = 'occupied' WHERE id = ? AND branch_id = ?");
+                            if (!$update_stmt) {
+                                error_log("DEBUG: Prepare failed for update table: " . $conn->error);
+                            } else {
+                                $update_stmt->bind_param("ii", $table_id, $current_branch_id);
+                                if (!$update_stmt->execute()) {
+                                    $message = "Error al actualizar estado de la mesa: " . $conn->error;
+                                    error_log("DEBUG: Error updating table status: " . $conn->error);
+                                }
+                                $update_stmt->close();
+                            }
+                            $message = "Pedido enviado a cocina exitosamente.";
+                            error_log("DEBUG: Order process completed successfully");
+                        } else {
+                            $message = "Error al crear el pedido: " . $conn->error;
+                            error_log("DEBUG: Error creating order: " . $conn->error);
+                        }
+                        $order_stmt->close();
                     }
-                    $order_stmt->close();
                 } else {
                     $message = "No hay items seleccionados.";
+                    error_log("DEBUG: Total is 0, no items selected");
                 }
             } else {
                 $message = "Datos inválidos para el pedido.";
+                error_log("DEBUG: Condition FAILED - table_id=$table_id, empty(quantities)=" . (empty($quantities) ? '1' : '0') . ", current_branch_id=$current_branch_id");
             }
         } elseif ($action === 'update_order_status') {
             $order_id = (int)($_POST['order_id'] ?? 0);
@@ -1035,7 +1069,7 @@ $conn->close();
             <div id="orderSummary" tabindex="-1" style="display: none; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 20px;">
                 <h4>Pedido Seleccionado</h4>
                 <div id="orderItems"></div>
-                <button type="submit" form="orderForm" class="btn btn-primary" style="margin-top: 20px;">Enviar a Cocina</button>
+                <button type="submit" form="orderForm" class="btn btn-primary" style="margin-top: 20px;" onclick="submitOrder(event)">Enviar a Cocina</button>
             </div>
         </div>
     </div>
@@ -1190,6 +1224,56 @@ $conn->close();
             } else {
                 alert('No hay items seleccionados');
             }
+        }
+
+        function submitOrder(e) {
+            e.preventDefault();
+            var form = document.getElementById('orderForm');
+            var formData = new FormData(form);
+            
+            // Debug: log form data
+            console.log('Form data being sent:');
+            for (var pair of formData.entries()) {
+                console.log(pair[0] + ': ' + pair[1]);
+            }
+            
+            // Validate that there are items selected
+            var hasItems = false;
+            for (var i = 0; i < menuItems.length; i++) {
+                var qty = parseInt(document.getElementById('quantity_' + menuItems[i].id).value);
+                if (qty > 0) {
+                    hasItems = true;
+                    break;
+                }
+            }
+            
+            if (!hasItems) {
+                alert('No hay items seleccionados en el pedido');
+                return;
+            }
+            
+            // Submit form via fetch
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('Error al enviar el pedido: ' + response.status);
+                }
+                return response.text();
+            })
+            .then(function(data) {
+                // Show success message and reload page
+                alert('Pedido enviado a cocina exitosamente');
+                setTimeout(function() {
+                    location.reload();
+                }, 1000);
+            })
+            .catch(function(error) {
+                alert('Error al enviar el pedido: ' + error.message);
+                console.log('Error details:', error);
+            });
         }
     </script>
 </body>
