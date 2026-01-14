@@ -1019,8 +1019,9 @@ $conn->close();
                                 <strong><?php echo htmlspecialchars($item['name']); ?></strong><br>
                                 $<?php echo number_format($item['price'], 0, ',', '.'); ?><br>
                                 <input type="hidden" name="quantity[<?php echo $item['id']; ?>]" id="quantity_<?php echo $item['id']; ?>" value="0">
+                                <button type="button" onclick="decreaseItem(<?php echo $item['id']; ?>)" class="btn" style="padding: 5px 8px; font-size: 12px; margin-right:6px;">-</button>
                                 <span id="qty_<?php echo $item['id']; ?>" style="display: inline-block; margin-right: 10px;">0</span>
-                                <button type="button" onclick="addItem(<?php echo $item['id']; ?>)" class="btn" style="padding: 5px 10px; font-size: 12px;">Agregar</button>
+                                <button type="button" onclick="addItem(<?php echo $item['id']; ?>)" class="btn" style="padding: 5px 10px; font-size: 12px;">+</button>
                             </div>
                         <?php endforeach; ?>
                     </div>
@@ -1031,7 +1032,7 @@ $conn->close();
                 </div>
                 <button type="button" onclick="addOrder()" class="btn btn-success" style="margin-top: 20px;">Agregar Pedido</button>
             </form>
-            <div id="orderSummary" style="display: none; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 20px;">
+            <div id="orderSummary" tabindex="-1" style="display: none; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 20px;">
                 <h4>Pedido Seleccionado</h4>
                 <div id="orderItems"></div>
                 <button type="submit" form="orderForm" class="btn btn-primary" style="margin-top: 20px;">Enviar a Cocina</button>
@@ -1080,6 +1081,14 @@ $conn->close();
             document.getElementById('order_table_id').value = tableId;
             document.getElementById('modal_table_number').textContent = tableNumber;
             document.getElementById('newOrderModal').style.display = "block";
+            // Reset quantities when opening modal for a new order
+            for (var i = 0; i < menuItems.length; i++) {
+                var id = menuItems[i].id;
+                var q = document.getElementById('quantity_' + id);
+                if (q) { q.value = 0; document.getElementById('qty_' + id).textContent = '0'; }
+            }
+            document.getElementById('orderSummary').style.display = 'none';
+            document.getElementById('orderItems').innerHTML = '';
         }
 
         function editOrder(orderId) {
@@ -1107,10 +1116,41 @@ $conn->close();
             }
         }
 
+        // Escape HTML to prevent injection and avoid JS ReferenceError
+        function escapeHtml(text) {
+            var map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return String(text).replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+
         function addItem(id) {
             var qty = document.getElementById('quantity_' + id);
             qty.value = parseInt(qty.value) + 1;
             document.getElementById('qty_' + id).textContent = qty.value;
+        }
+
+        function decreaseItem(id) {
+            var qty = document.getElementById('quantity_' + id);
+            var v = parseInt(qty.value);
+            if (v > 0) {
+                qty.value = v - 1;
+                document.getElementById('qty_' + id).textContent = qty.value;
+            }
+        }
+
+        function removeFromSummary(id) {
+            // Set quantity to 0 and refresh the summary
+            var qty = document.getElementById('quantity_' + id);
+            if (qty) {
+                qty.value = 0;
+                document.getElementById('qty_' + id).textContent = '0';
+                addOrder();
+            }
         }
 
         function addOrder() {
@@ -1124,7 +1164,8 @@ $conn->close();
                 if (qty > 0) {
                     hasItems = true;
                     var div = document.createElement('div');
-                    div.textContent = item.name + ' x' + qty + ' - $' + (item.price * qty);
+                    div.innerHTML = '<span>' + escapeHtml(item.name) + ' x' + qty + ' - $' + (item.price * qty) + '</span>' +
+                                    ' <button type="button" onclick="removeFromSummary(' + item.id + ')" class="btn btn-sm" style="margin-left:10px;">Eliminar</button>';
                     orderItems.appendChild(div);
                     total += item.price * qty;
                 }
@@ -1133,13 +1174,19 @@ $conn->close();
                 var notes = document.getElementById('order_notes').value;
                 if (notes.trim() !== '') {
                     var notesDiv = document.createElement('div');
-                    notesDiv.innerHTML = '<strong>Notas:</strong> ' + notes;
+                    notesDiv.innerHTML = '<strong>Notas:</strong> ' + escapeHtml(notes);
                     orderItems.appendChild(notesDiv);
                 }
                 var totalDiv = document.createElement('div');
                 totalDiv.innerHTML = '<strong>Total: $' + total + '</strong>';
                 orderItems.appendChild(totalDiv);
-                document.getElementById('orderSummary').style.display = 'block';
+                var summaryEl = document.getElementById('orderSummary');
+                summaryEl.style.display = 'block';
+                summaryEl.style.background = '#ffffff';
+                summaryEl.style.padding = '12px';
+                summaryEl.style.borderRadius = '6px';
+                summaryEl.style.boxShadow = '0 6px 20px rgba(0,0,0,0.08)';
+                try { summaryEl.scrollIntoView({behavior: 'smooth', block: 'center'}); summaryEl.focus(); } catch(e) { /* ignore */ }
             } else {
                 alert('No hay items seleccionados');
             }
