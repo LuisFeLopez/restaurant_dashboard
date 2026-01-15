@@ -97,27 +97,48 @@ function getSectionData($section, $branch_id, $conn) {
             $stmt->close();
             break;
         case 'pedidos':
-            // Obtener pedidos activos de la sede
+            // Obtener pedidos activos de la sede con items del menú
             // Usar la columna table_number de orders en lugar de join por table_id (evita errores si la columna no existe)
-            $sql = "SELECT o.*, o.table_number, ru.full_name as user_name FROM orders o LEFT JOIN restaurant_users ru ON o.user_id = ru.id WHERE o.branch_id = ? AND o.status IN ('pending', 'preparing', 'ready') ORDER BY o.created_at DESC";
+            $sql = "SELECT o.*, o.table_number, ru.full_name as user_name FROM orders o LEFT JOIN restaurant_users ru ON o.user_id = ru.id WHERE o.branch_id = ? AND o.status IN ('pending', 'preparing', 'ready', 'delivered') ORDER BY o.created_at DESC";
             $stmt = $conn->prepare($sql);
             $stmt->bind_param("i", $branch_id);
             $stmt->execute();
             $result = $stmt->get_result();
             while ($row = $result->fetch_assoc()) {
+                // Obtener los items del pedido
+                $items_stmt = $conn->prepare("SELECT oi.quantity, oi.price, mi.name FROM order_items oi LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id WHERE oi.order_id = ?");
+                $items_stmt->bind_param("i", $row['id']);
+                $items_stmt->execute();
+                $items_result = $items_stmt->get_result();
+                $order_items = [];
+                while ($item_row = $items_result->fetch_assoc()) {
+                    $order_items[] = $item_row;
+                }
+                $row['items'] = $order_items;
+                $items_stmt->close();
                 $data[] = $row;
             }
             $stmt->close();
             break;
         case 'cocina':
-            // Pedidos en cocina
-            // Usar la columna table_number de orders en lugar de join por table_id
+            // Pedidos en cocina con items del menú
             $sql = "SELECT o.*, o.table_number, ru.full_name as user_name FROM orders o LEFT JOIN restaurant_users ru ON o.user_id = ru.id WHERE o.branch_id = ? AND o.status = 'preparing' ORDER BY o.created_at ASC";
             $stmt = $conn->prepare($sql);
             $stmt->bind_param("i", $branch_id);
             $stmt->execute();
             $result = $stmt->get_result();
             while ($row = $result->fetch_assoc()) {
+                // Obtener los items del pedido
+                $items_stmt = $conn->prepare("SELECT oi.quantity, oi.price, mi.name FROM order_items oi LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id WHERE oi.order_id = ?");
+                $items_stmt->bind_param("i", $row['id']);
+                $items_stmt->execute();
+                $items_result = $items_stmt->get_result();
+                $order_items = [];
+                while ($item_row = $items_result->fetch_assoc()) {
+                    $order_items[] = $item_row;
+                }
+                $row['items'] = $order_items;
+                $items_stmt->close();
                 $data[] = $row;
             }
             $stmt->close();
@@ -386,6 +407,37 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                         $message = "Pedido cancelado exitosamente.";
                     } else {
                         $message = "Error al cancelar el pedido.";
+                    }
+                    $stmt->close();
+                } else {
+                    $message = "Pedido no encontrado.";
+                }
+                $check_stmt->close();
+            } else {
+                $message = "Datos inválidos.";
+            }
+        } elseif ($action === 'complete_order') {
+            $order_id = (int)($_POST['order_id'] ?? 0);
+            if ($order_id > 0 && $current_branch_id) {
+                // Check if order belongs to this branch
+                $check_stmt = $conn->prepare("SELECT id, table_number FROM orders WHERE id = ? AND branch_id = ?");
+                $check_stmt->bind_param("ii", $order_id, $current_branch_id);
+                $check_stmt->execute();
+                $check_result = $check_stmt->get_result();
+                if ($check_result->num_rows > 0) {
+                    $order_row = $check_result->fetch_assoc();
+                    // Update order status to completed
+                    $stmt = $conn->prepare("UPDATE orders SET status = 'completed' WHERE id = ? AND branch_id = ?");
+                    $stmt->bind_param("ii", $order_id, $current_branch_id);
+                    if ($stmt->execute()) {
+                        // Update table status to available
+                        $table_stmt = $conn->prepare("UPDATE restaurant_tables SET status = 'available' WHERE table_number = ? AND branch_id = ?");
+                        $table_stmt->bind_param("ii", $order_row['table_number'], $current_branch_id);
+                        $table_stmt->execute();
+                        $table_stmt->close();
+                        $message = "Pedido completado y guardado en el historial.";
+                    } else {
+                        $message = "Error al completar el pedido.";
                     }
                     $stmt->close();
                 } else {
@@ -858,18 +910,42 @@ $conn->close();
                     <p>No hay pedidos activos.</p>
                 <?php else: ?>
                     <?php foreach ($section_data as $order): ?>
-                        <div class="order-item">
+                        <div class="order-item" id="order-<?php echo $order['id']; ?>">
                             <div class="order-header">
                                 <strong>Pedido #<?php echo $order['id']; ?> - Mesa <?php echo htmlspecialchars($order['table_number']); ?></strong>
-                                <span class="status-badge status-<?php echo $order['status']; ?>"><?php echo ucfirst($order['status']); ?></span>
+                                <span class="status-badge status-<?php echo $order['status']; ?>" id="status-badge-<?php echo $order['id']; ?>"><?php echo ucfirst($order['status']); ?></span>
                             </div>
                             <p><strong>Mesero:</strong> <?php echo htmlspecialchars($order['user_name'] ?? 'N/A'); ?></p>
                             <p><strong>Total:</strong> $<?php echo number_format($order['total'], 0, ',', '.'); ?></p>
                             <p><strong>Hora:</strong> <?php echo date('H:i', strtotime($order['created_at'])); ?></p>
+                            
+                            <?php if (!empty($order['notes'])): ?>
+                                <p><strong>Notas:</strong> <em><?php echo htmlspecialchars($order['notes']); ?></em></p>
+                            <?php endif; ?>
+                            
+                            <?php if (!empty($order['items'])): ?>
+                                <div class="order-items-list">
+                                    <h4 style="margin: 10px 0 5px 0; font-size: 14px;">Artículos del Pedido:</h4>
+                                    <ul style="margin: 5px 0; padding-left: 20px;">
+                                        <?php foreach ($order['items'] as $item): ?>
+                                            <li>
+                                                <strong><?php echo htmlspecialchars($item['name'] ?? 'N/A'); ?></strong>
+                                                x <?php echo $item['quantity']; ?>
+                                                - $<?php echo number_format($item['price'] * $item['quantity'], 2); ?>
+                                            </li>
+                                        <?php endforeach; ?>
+                                    </ul>
+                                </div>
+                            <?php endif; ?>
+                            
                             <div>
-                                <button class="btn btn-warning" onclick="editOrder(<?php echo $order['id']; ?>)">Editar</button>
-                                <button class="btn btn-success" onclick="updateOrderStatus(<?php echo $order['id']; ?>, 'preparing')">Preparar</button>
-                                <button class="btn btn-danger" onclick="cancelOrder(<?php echo $order['id']; ?>)">Cancelar</button>
+                                <?php if ($order['status'] === 'pending'): ?>
+                                    <button class="btn btn-success" onclick="updateOrderStatus(<?php echo $order['id']; ?>, 'preparing')">Preparar</button>
+                                <?php elseif ($order['status'] === 'ready'): ?>
+                                    <button class="btn btn-info" onclick="updateOrderStatus(<?php echo $order['id']; ?>, 'delivered')">Entregado</button>
+                                <?php elseif ($order['status'] === 'delivered'): ?>
+                                    <button class="btn btn-warning" onclick="completeOrder(<?php echo $order['id']; ?>)">Finalizado</button>
+                                <?php endif; ?>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -888,20 +964,32 @@ $conn->close();
                             </div>
                             <p><strong>Mesero:</strong> <?php echo htmlspecialchars($order['user_name'] ?? 'N/A'); ?></p>
                             <p><strong>Hora:</strong> <?php echo date('H:i', strtotime($order['created_at'])); ?></p>
-                        </div>
-                    <?php endforeach; ?>
-                <?php endif; ?>
+                            
+                            <?php if (!empty($order['notes'])): ?>
+                                <p><strong>Notas:</strong> <em><?php echo htmlspecialchars($order['notes']); ?></em></p>
+                            <?php endif; ?>
+                        
+                            <?php if (!empty($order['items'])): ?>
+                            <div class="order-items-list">
+                                <h4 style="margin: 10px 0 5px 0; font-size: 14px;">Artículos del Pedido:</h4>
+                                <ul style="margin: 5px 0; padding-left: 20px;">
+                                    <?php foreach ($order['items'] as $item): ?>
+                                        <li>
+                                            <strong><?php echo htmlspecialchars($item['name'] ?? 'N/A'); ?></strong>
+                                            x <?php echo $item['quantity']; ?>
+                                            - $<?php echo number_format($item['price'] * $item['quantity'], 2); ?>
+                                        </li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
 
             <?php elseif ($current_section === 'menu'): ?>
                 <table>
                     <thead>
-                        <tr>
-                            <th>Nombre</th>
-                            <th>Categoría</th>
-                            <th>Precio</th>
-                            <th>Descripción</th>
-                        </tr>
-                    </thead>
                     <tbody>
                         <?php foreach ($section_data as $item): ?>
                             <tr>
@@ -1132,19 +1220,68 @@ $conn->close();
 
         function updateOrderStatus(orderId, status) {
             if (confirm('¿Cambiar estado del pedido ' + orderId + ' a ' + status + '?')) {
-                $.post('', { action: 'update_order_status', order_id: orderId, status: status }, function(response) {
+                fetch('', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'action=update_order_status&order_id=' + orderId + '&status=' + status
+                })
+                .then(response => response.text())
+                .then(data => {
+                    // Actualizar el badge de estado sin recargar
+                    const badge = document.getElementById('status-badge-' + orderId);
+                    if (badge) {
+                        badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+                        badge.className = 'status-badge status-' + status;
+                    }
+                    // Actualizar los botones
                     location.reload();
-                }).fail(function() {
+                })
+                .catch(error => {
+                    console.error('Error:', error);
                     alert('Error al actualizar el estado del pedido');
+                });
+            }
+        }
+
+        function completeOrder(orderId) {
+            if (confirm('¿Finalizar pedido ' + orderId + '? El pedido se guardará en el historial.')) {
+                fetch('', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'action=complete_order&order_id=' + orderId
+                })
+                .then(response => response.text())
+                .then(data => {
+                    // Eliminar el pedido de la pantalla
+                    const orderDiv = document.getElementById('order-' + orderId);
+                    if (orderDiv) {
+                        orderDiv.style.opacity = '0';
+                        orderDiv.style.transition = 'opacity 0.3s';
+                        setTimeout(() => {
+                            orderDiv.remove();
+                        }, 300);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error al finalizar el pedido');
                 });
             }
         }
 
         function cancelOrder(orderId) {
             if (confirm('¿Cancelar pedido ' + orderId + '?')) {
-                $.post('', { action: 'cancel_order', order_id: orderId }, function(response) {
+                fetch('', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'action=cancel_order&order_id=' + orderId
+                })
+                .then(response => response.text())
+                .then(data => {
                     location.reload();
-                }).fail(function() {
+                })
+                .catch(error => {
+                    console.error('Error:', error);
                     alert('Error al cancelar el pedido');
                 });
             }
